@@ -24,7 +24,7 @@
 #include "driverlib/sysctl.h"
 #include "driverlib/gpio.h"
 #include "driverlib/pin_map.h"
-
+#include <math.h>
 /* Controller is initially clocked with 16 MHz (via PIOSC) */
 /* !!! Changing this macro does not change clock speed !!! */
 #define F_CPU (16000000)
@@ -32,7 +32,10 @@
 volatile uint32_t Blinkspeed = 1;
 uint32_t OneSecond = 615385*2;
 
-uint32_t I2CReceive(uint32_t slave_addr, uint8_t reg)
+volatile unsigned char MSB;
+volatile unsigned char LSB;
+
+int I2CReceive(uint32_t slave_addr, uint8_t reg)
     {
         //specify that we are writing (a register address) to the
         //slave device
@@ -56,16 +59,44 @@ uint32_t I2CReceive(uint32_t slave_addr, uint8_t reg)
 
         //wait for MCU to finish transaction
         while(I2CMasterBusy(I2C0_BASE));
+        MSB = I2CMasterDataGet(I2C0_BASE);
+
+         for (int i=0;i<30;i++);
+        LSB = I2CMasterDataGet(I2C0_BASE);
+        uint32_t tmp  = (MSB << 8);
+        tmp  |= LSB;
 
         //return data pulled from the specified register
-        return I2CMasterDataGet(I2C0_BASE);
+        return tmp;
     }
+
+// Calulate temperature from the TMP006 datasheet
+long double calculateTemp(int Tdie, int Vobj){
+  long double Vobj2 = (double)Vobj*.00000015625;
+  long double Tdie2 = (double)Tdie*.03125 + 273.15;
+  long double S0 = 2.24*pow(10,-14);             // Tommy's S0
+  //long double S0 = 6.033*pow(10,-14);
+  long double a1 = 1.70*pow(10,-3);
+  long double a2 = -2.0*pow(10,-5);
+  long double b0 = -2.57*pow(10,-5);
+  long double b1 = -9.48*pow(10,-8);
+  long double b2 = 2.26*pow(10,-10);
+  long double c2 = 0;
+  long double Tref = 298.15;
+  long double S = S0*(1+a1*(Tdie2 - Tref)+a2*pow((Tdie2 - Tref),2));
+  long double Vos = b0 + b1*(Tdie2 - Tref) + b2*pow((Tdie2 - Tref),2);
+  long double fObj = (Vobj2 - Vos) + c2*pow((Vobj2 - Vos),2);
+  long double Tobj = pow(pow(Tdie2,4) + (fObj/S),.25);
+  return (Tobj - 273.15);
+}
 
 
 int main(void)
 {
     uint32_t ui32Loop;
-    uint32_t ui32temp = 0;
+    long double  LDtemp = 0;
+    int vObj = 0;
+    int tDie = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
 
     /* Activate GPIO ports */
@@ -91,6 +122,7 @@ int main(void)
     GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);
     GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);
 
+    //Initilize the I2CMaster Moduke
     I2CMasterInitExpClk(I2C0_BASE, SysCtlClockFreqSet(SYSCTL_OSC_INT | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_320,     F_CPU), false);
 
     //clear I2C FIFOs
@@ -111,17 +143,28 @@ int main(void)
     //GPIOPinWrite( GPIO_PORTG_BASE, GPIO_PIN_0 ,1);
     GPIOPinTypeGPIOOutput(GPIO_PORTG_BASE, GPIO_PIN_0 );
 
+
+// I2CSendString(0X42F, 1);
     while(1) {
 
-        for(ui32Loop = 0; ui32Loop < OneSecond; ui32Loop++)
+        for(ui32Loop = 0; ui32Loop < OneSecond/3; ui32Loop++)
                              __nop(); /* "No operation", prohibits possible loop elimination by the compiler. */
+        GPIOPinWrite( GPIO_PORTG_BASE, GPIO_PIN_0 ,1);
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, 8);
-       ui32temp = I2CReceive(0x40, 0x01);
-       printf("Button 1: %d\n", ui32temp);
+
+        vObj = I2CReceive(0x40, 0x00);
+        tDie =  I2CReceive(0x40, 0x01);
+
+        tDie = tDie >> 2;
+       LDtemp = calculateTemp(tDie,vObj);
+       printf("vObj: %x\n", vObj);
+       printf("tDie: %x\n", tDie);
+       printf("Temp: %Lf\n", LDtemp);
        for(ui32Loop = 0; ui32Loop < OneSecond; ui32Loop++)
                             __nop(); /* "No operation", prohibits possible loop elimination by the compiler. */
        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, 0);
-       for(ui32Loop = 0; ui32Loop < OneSecond; ui32Loop++)
+       GPIOPinWrite( GPIO_PORTG_BASE, GPIO_PIN_0 ,0);
+       for(ui32Loop = 0; ui32Loop < OneSecond/3; ui32Loop++)
                                 __nop(); /* "No operation", prohibits possible loop elimination by the compiler. */
     }
 
